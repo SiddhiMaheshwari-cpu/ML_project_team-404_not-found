@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
+env/
+
+# Data files (optional: agar dataset 100MB+ ho jaye)
+# member1_dataset.json
+
+# VS Code / IDE
+.vscode/
+.idea/
