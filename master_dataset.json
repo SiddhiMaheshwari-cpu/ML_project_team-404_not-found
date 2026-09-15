@@ -1,0 +1,12 @@
+[
+    {
+        "id": "SYNTHETIC_001",
+        "source": "synthetic_mutation",
+        "repo_name": "psf/requests",
+        "commit_sha": "b5a91f3c1284a1e94112",
+        "failing_test_command": "pytest tests/test_utils.py::test_address_in_network",
+        "raw_error_log": "Traceback (most recent call last):\n  File ... IndexError: list index out of range",
+        "ground_truth_patch": "--- a/src/requests/utils.py\n+++ b/src/requests/utils.py\n@@ -1,3 +1,3 @@\n- return items[i + 1]\n+ return items[i]",
+        "ast_scope": "function: get_encodings_from_headers"
+    }
+]
