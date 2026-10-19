@@ -1,4 +1,4 @@
-
+from integrated_pipeline import analyze_error
 import pytest
 
 from ast_parser.context_extractor import (
@@ -56,3 +56,13 @@ def test_pipeline():
 def test_missing_file():
     with pytest.raises(FileNotFoundError):
         get_code_context(".", "missing_file.py", "example")
+def test_integrated_pipeline_with_missing_file():
+    error_log = '''Traceback (most recent call last):
+  File "sample.py", line 2, in run
+    x = missing_function()
+NameError: name 'missing_function' is not defined'''
+
+    result = analyze_error(".", error_log)
+
+    assert result["context"] is None
+    assert len(result["similar_bugs"]) == 2
