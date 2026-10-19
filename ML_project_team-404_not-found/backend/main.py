@@ -1,12 +1,21 @@
-"""AURA-OS backend.
+"""AURA-OS backend."""
+import sys
+import os
 
-aura_watcher.py  --HTTP POST /api/heal-->  this server  --WebSocket /ws-->  React dashboard
-"""
+# NUCLEAR PATH FIX: Adding every possible parent directory to Python's path
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.abspath(os.path.join(THIS_DIR, ".."))
+GRANDPARENT_DIR = os.path.abspath(os.path.join(PARENT_DIR, ".."))
 
+sys.path.insert(0, PARENT_DIR)
+sys.path.insert(0, GRANDPARENT_DIR)
+sys.path.insert(0, os.getcwd())
+
+# Ab ye 100% milega
+from ast_parser.pipeline import extract_context_from_error
 import ast
 import asyncio
 import difflib
-import os
 import re
 import time
 import uuid
@@ -113,7 +122,7 @@ async def ask_gemini(prompt: str) -> str:
         return await asyncio.wait_for(asyncio.to_thread(_generate, prompt), timeout=GEMINI_TIMEOUT)
 
 
-def build_prompt(lang: str, code: str) -> str:
+def build_prompt(lang: str, code: str, ast_context_text: str = "") -> str:
     if lang in ("HTML", "CSS"):
         # UI/Design files: strict prompt, structure only
         return (
@@ -122,11 +131,17 @@ def build_prompt(lang: str, code: str) -> str:
             "layout logic. If the syntax is structurally valid, strictly reply with 'PERFECT'. "
             f"Return ONLY raw code:\n\n{code}"
         )
-    return (
+    
+    prompt = (
         f"Review this {lang} code. If there are NO syntax or logical bugs, strictly reply with the word "
         f"'PERFECT' and nothing else. If there are bugs, fix them and return ONLY the raw valid {lang} code "
         f"without explanations or markdown blocks:\n\n{code}"
     )
+
+    if ast_context_text:
+        prompt += f"\n\n[AST ANALYSIS CONTEXT (Use this to understand deep errors)]\n{ast_context_text}"
+
+    return prompt
 
 
 def clean_markdown(text: str) -> str:
@@ -161,9 +176,10 @@ class CodeData(BaseModel):
     filepath: str
     code: str
     local_ok: bool = False  # watcher's own syntax check passed -> skip Gemini, just tell the UI
+    error_log: str = ""     # Added to receive the error log for Member 2's AST parser
 
 
-async def run_heal(filepath: str, code: str, local_ok: bool = False) -> dict:
+async def run_heal(filepath: str, code: str, local_ok: bool = False, error_log: str = "") -> dict:
     filename = os.path.basename(filepath)
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     lang = LANGUAGE_MAP.get(ext, "code")
@@ -185,8 +201,23 @@ async def run_heal(filepath: str, code: str, local_ok: bool = False) -> dict:
         await manager.emit(event)
         return {"status": "success", "patch": code, "changed": False}
 
+    # Integrate Member 2's AST Logic
+    ast_context_text = ""
+    if error_log:
+        try:
+            ast_info = extract_context_from_error(".", error_log)
+            if ast_info:
+                print(f"[AURA BRAIN] 🧩 AST Context extracted for {filename}")
+                ast_context_text = (
+                    f"Error is at Line {ast_info['line_number']} in {ast_info['file_path']}.\n"
+                    f"AST Context:\n{ast_info['code_context']}"
+                )
+        except Exception as e:
+            print(f"[AURA BRAIN] ⚠️ Failed to extract AST context: {e}")
+
     try:
-        fixed_code = clean_markdown(await ask_gemini(build_prompt(lang, code)))
+        # Pass the AST context to the prompt builder
+        fixed_code = clean_markdown(await ask_gemini(build_prompt(lang, code, ast_context_text)))
 
         if is_perfect(fixed_code):
             print(f"✅ [AI CHECK] {filename} ({lang}) is structurally perfect. No patch needed.")
@@ -214,6 +245,7 @@ async def run_heal(filepath: str, code: str, local_ok: bool = False) -> dict:
         message = f"Gemini did not answer within {GEMINI_TIMEOUT:.0f}s"
     except Exception as exc:  # quota (429), blocked response, network, bad patch...
         message = str(exc) or exc.__class__.__name__
+    
     print(f"[ERROR] {filename}: {message}")
     finish(status="error", message=message)
     await manager.emit(event)
@@ -222,4 +254,5 @@ async def run_heal(filepath: str, code: str, local_ok: bool = False) -> dict:
 
 @app.post("/api/heal")
 async def heal_code(data: CodeData):
-    return await run_heal(data.filepath, data.code, data.local_ok)
+    # Now passing data.error_log to run_heal
+    return await run_heal(data.filepath, data.code, data.local_ok, data.error_log)
