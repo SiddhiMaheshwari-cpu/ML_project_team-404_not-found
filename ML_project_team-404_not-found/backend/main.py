@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "60"))  # seconds
 MAX_HISTORY = 50
 model = genai.GenerativeModel(MODEL_NAME)
