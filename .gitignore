@@ -11,3 +11,5 @@ env/
 # VS Code / IDE
 .vscode/
 .idea/
+# Local vector database
+chroma_bug_memory/
