@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 const WS_URL = "ws://127.0.0.1:8000/ws";
+const APPROVE_URL = "http://127.0.0.1:8000/api/approve-patch";
 
 const STAGES = [
   { title: "Intercept", desc: "Catches the failed run", color: "#f5a524", icon: "alert" },
   { title: "Analyze", desc: "Parses the code, asks Gemini", color: "#4aa3ff", icon: "search" },
-  { title: "Synthesize", desc: "Writes and saves the patch", color: "#3ecf8e", icon: "code" },
+  { title: "Synthesize", desc: "Awaits approval & applies patch", color: "#3ecf8e", icon: "code" },
 ];
 
 const css = `
@@ -43,8 +44,13 @@ export default function App() {
   ]);
   const [patchCode, setPatchCode] = useState("");
   const [patchFile, setPatchFile] = useState("");
+  const [patchFilePath, setPatchFilePath] = useState("");
+  const [patchLang, setPatchLang] = useState("");
+  const [approvalStatus, setApprovalStatus] = useState("idle"); // idle | pending | applying | approved | rejected
   const [activeStep, setActiveStep] = useState(0);
   const logsEndRef = useRef(null);
+
+  const addLog = (level, text) => setLogs((prev) => [...prev, makeLog(level, text)]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -62,8 +68,6 @@ export default function App() {
       }
     };
 
-    const addLog = (level, text) => setLogs((prev) => [...prev, makeLog(level, text)]);
-
     try {
       ws = new WebSocket(WS_URL);
 
@@ -75,27 +79,44 @@ export default function App() {
         try {
           const data = JSON.parse(event.data);
 
-          if (data.status === "success") {
-            const name = data.filename || "file";
+          // Ignore initial history snapshot on connect
+          if (data.status === "snapshot") return;
+
+          const name = data.filename || "file";
+          const lang = data.language || "code";
+
+          if (data.status === "analyzing") {
             clearActiveTimeouts();
             setActiveStep(1);
             setPatchFile(name);
-            addLog("warn", `Failure caught in ${name}.`);
-            setPatchCode("");
+            setPatchFilePath(data.filepath || "");
+            setPatchLang(lang);
+            setApprovalStatus("idle");
+            addLog("warn", `Failure caught in ${name} (${lang}).`);
 
             const t1 = setTimeout(() => {
               setActiveStep(2);
-              addLog("info", "Analyzing the error and asking Gemini for a fix.");
-
-              const t2 = setTimeout(() => {
-                setActiveStep(3);
-                setPatchCode(data.patch || "");
-                addLog("success", `Patch saved. ${name} has been fixed.`);
-              }, 1500);
-              timeouts.push(t2);
-            }, 1000);
+              addLog("info", `Analyzing ${lang} error and asking Gemini for a fix...`);
+            }, 400);
             timeouts.push(t1);
-          } else {
+          } else if (data.status === "success") {
+            clearActiveTimeouts();
+            setPatchFile(name);
+            setPatchFilePath(data.filepath || "");
+            setPatchLang(lang);
+
+            if (data.changed && data.patch) {
+              setActiveStep(3);
+              setPatchCode(data.patch);
+              setApprovalStatus("pending");
+              addLog("warn", `Patch ready for ${name}. Waiting for human approval.`);
+            } else {
+              setActiveStep(0);
+              setApprovalStatus("idle");
+              addLog("info", `${name}: ${data.message || "No issues found."}`);
+            }
+          } else if (data.status === "error") {
+            setActiveStep(0);
             addLog("error", data.message || "Operation failed.");
           }
         } catch {
@@ -103,13 +124,8 @@ export default function App() {
         }
       };
 
-      ws.onerror = () => {
-        setIsConnected(false);
-      };
-
-      ws.onclose = () => {
-        setIsConnected(false);
-      };
+      ws.onerror = () => setIsConnected(false);
+      ws.onclose = () => setIsConnected(false);
     } catch (error) {
       console.error("WebSocket connection error:", error);
     }
@@ -128,16 +144,53 @@ export default function App() {
     };
   }, []);
 
+  const handleApprove = async () => {
+    if (!patchFilePath || !patchCode) return;
+    setApprovalStatus("applying");
+    try {
+      const res = await fetch(APPROVE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_path: patchFilePath,
+          patched_code: patchCode,
+        }),
+      });
+      const result = await res.json();
+      if (result.status === "success") {
+        setApprovalStatus("approved");
+        addLog("success", `Approved & applied fix to ${patchFile}!`);
+      } else {
+        setApprovalStatus("pending");
+        addLog("error", `Failed to apply patch: ${result.message}`);
+      }
+    } catch {
+      setApprovalStatus("pending");
+      addLog("error", "Could not reach backend to apply patch.");
+    }
+  };
+
+  const handleReject = () => {
+    setApprovalStatus("rejected");
+    setActiveStep(0);
+    addLog("info", `Patch rejected for ${patchFile}. File left untouched.`);
+  };
+
   const isWorking = activeStep > 0 && activeStep < 3;
   const headline = !isConnected
     ? "Backend not reachable"
     : isWorking
-    ? "Fixing the failure"
-    : activeStep === 3
-    ? "Fix saved"
+    ? "Analyzing & generating fix"
+    : approvalStatus === "pending"
+    ? "Approval required"
+    : approvalStatus === "approved"
+    ? "Fix approved & applied"
     : "Waiting for a failure";
+
   const accent = !isConnected
     ? "#ef5b5b"
+    : approvalStatus === "pending"
+    ? "#f5a524"
     : activeStep === 0
     ? "#8b9bb0"
     : STAGES[Math.min(activeStep, 3) - 1].color;
@@ -153,7 +206,7 @@ export default function App() {
             <LogoMark working={isWorking} color={accent} />
             <div>
               <h1 className="text-xl font-semibold text-white leading-tight">AURA</h1>
-              <p className="text-sm text-[#7f8da0]">Self-healing pipeline for Python files</p>
+              <p className="text-sm text-[#7f8da0]">Multi-language self-healing pipeline with human approval</p>
             </div>
           </div>
 
@@ -191,10 +244,10 @@ export default function App() {
             <div className="min-w-0">
               <h2 className="text-lg font-semibold text-white">{headline}</h2>
               <p className="text-sm text-[#7f8da0] mt-0.5">
-                {activeStep === 0
-                  ? "Save a Python file in the monitored folder. If it errors, AURA writes a fix."
+                {activeStep === 0 && approvalStatus === "idle"
+                  ? "Save any code file (.py, .js, .cpp, .java, etc.) in the monitored folder. If it errors, AURA prepares a fix."
                   : patchFile
-                  ? `Working on ${patchFile}`
+                  ? `Working on ${patchFile}${patchLang ? ` (${patchLang})` : ""}`
                   : ""}
               </p>
             </div>
@@ -241,7 +294,46 @@ export default function App() {
           </section>
 
           <section className="lg:col-span-3 rounded-lg overflow-hidden border border-[#252d38] bg-[#141a22] flex flex-col min-w-0">
-            <PanelHeader title="Patch" right={patchCode ? patchFile : ""} />
+            <div className="px-4 py-2.5 border-b border-[#252d38] flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="text-sm font-semibold text-white">Patch</span>
+                {patchCode && patchFile ? (
+                  <span className="text-xs px-2 py-0.5 rounded bg-[#1c2530] text-[#9aa7b8] font-mono truncate">
+                    {patchFile}
+                  </span>
+                ) : null}
+              </div>
+
+              {approvalStatus === "pending" && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleReject}
+                    className="px-3 py-1 rounded-md text-xs font-medium border border-[#52262a] bg-[#251416] text-[#f08a8a] hover:bg-[#351b1e] transition cursor-pointer"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    onClick={handleApprove}
+                    className="px-3.5 py-1 rounded-md text-xs font-semibold bg-[#3ecf8e] text-[#0e1319] hover:bg-[#34b87d] transition cursor-pointer"
+                  >
+                    Approve & Apply Fix
+                  </button>
+                </div>
+              )}
+
+              {approvalStatus === "applying" && (
+                <span className="text-xs text-[#4aa3ff] font-medium">Applying...</span>
+              )}
+
+              {approvalStatus === "approved" && (
+                <span className="text-xs text-[#3ecf8e] font-semibold">✓ Applied to file</span>
+              )}
+
+              {approvalStatus === "rejected" && (
+                <span className="text-xs text-[#f08a8a] font-medium">✕ Rejected</span>
+              )}
+            </div>
+
             <div className="bg-[#0a0e13] h-80 overflow-auto">
               {patchCode ? (
                 <DiffView code={patchCode} />

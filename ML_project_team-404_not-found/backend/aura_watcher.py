@@ -16,9 +16,12 @@ TYPING_WAIT_SECONDS = 0.8    # Fast side-by-side trigger (0.8s micro-pause)
 COOLDOWN_SECONDS = 2.0
 REQUEST_TIMEOUT = 90
 MAX_FILE_BYTES = 200_000
-AUTO_APPLY_FIX = True
+AUTO_APPLY_FIX = False       # Human-in-the-loop: wait for Dashboard approval
 
-ALLOWED_EXTENSIONS = (".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp", ".cs", ".go", ".rb", ".php", ".html", ".css", ".json", ".yaml", ".yml")
+ALLOWED_EXTENSIONS = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp",
+    ".cs", ".go", ".rb", ".php", ".html", ".css", ".json", ".yaml", ".yml"
+)
 IGNORED_DIRS = [".venv", "__pycache__", ".git", "node_modules", "aura-os"]
 IGNORED_FILES = {
     "main.py", "aura_watcher.py", "check_models.py",
@@ -71,7 +74,7 @@ class AuraAgent(FileSystemEventHandler):
 
             if not snapshot_code.strip():
                 return
-            
+
             # Prevent infinite loops when AURA saves a healed file
             if "@aura-healed" in snapshot_code or "// @aura-healed" in snapshot_code:
                 return
@@ -88,39 +91,42 @@ class AuraAgent(FileSystemEventHandler):
                     local_ok = False
                     error_log = f"Line {e.lineno}: {e.msg}"
             elif filepath.endswith((".js", ".ts", ".jsx", ".tsx")):
-                # For JS/TS files, we allow them to pass local check so they don't loop, 
-                # but if you want Gemini to scan them, you can handle it via backend or set local_ok = False intentionally.
-                # To prevent infinite loops on valid JS files, default to True unless a fix is needed:
-                
                 check = subprocess.run(["node", "--check", filepath], capture_output=True, text=True)
                 local_ok = (check.returncode == 0) and ("// aura-fix" not in snapshot_code.lower())
+                if not local_ok and check.stderr:
+                    error_log = check.stderr.strip()
             else:
-                local_ok = True
+                # Send all other supported languages (C++, Java, HTML, CSS, Go, etc.) to Gemini
+                local_ok = False
 
             if local_ok:
                 print(f"✅ [LOCAL CHECK] {name} is syntax-error free. Notifying Dashboard (0 Gemini cost)...")
             else:
-                print(f"[AURA WATCHER] ⚡ Live-healing {name} in background...")
+                print(f"[AURA WATCHER] ⚡ Analyzing {name} via AURA Brain...")
                 if error_log:
                     print(f"[AURA WATCHER] 📝 Error details for {name}: {error_log}")
 
-            # Always notify backend so WebSocket updates the React UI live!
+            # Notify backend so WebSocket updates the React UI live
             response = requests.post(
                 API_URL,
-                json={"filepath": filepath, "code": snapshot_code, "local_ok": local_ok},
+                json={
+                    "filepath": filepath,
+                    "code": snapshot_code,
+                    "local_ok": local_ok,
+                    "error_log": error_log,
+                },
                 timeout=REQUEST_TIMEOUT,
             )
             if local_ok or response.status_code != 200:
                 return
+
             result = response.json()
             fixed_code = result.get("patch")
             if fixed_code and result.get("changed"):
                 if AUTO_APPLY_FIX:
-                    # Read latest live file (in case user typed new lines at the bottom while AI worked)
                     with open(filepath, "r", encoding="utf-8") as current_file:
                         live_code = current_file.read()
 
-                    # If user added extra text at the end of the file while AI was thinking, preserve it!
                     if live_code != snapshot_code and live_code.startswith(snapshot_code):
                         newly_typed_suffix = live_code[len(snapshot_code):]
                         final_code = fixed_code.rstrip() + "\n" + newly_typed_suffix.lstrip("\n")
@@ -131,6 +137,8 @@ class AuraAgent(FileSystemEventHandler):
                     with open(filepath, "w", encoding="utf-8") as fixed_file:
                         fixed_file.write(final_code)
                     print(f"[AURA WATCHER] ✨ SIDE-BY-SIDE FIX APPLIED: {name}")
+                else:
+                    print(f"[AURA WATCHER] ⏳ Patch ready for human approval on Dashboard: {name}")
 
         except Exception as e:
             print(f"[AURA WATCHER] ⚠️ Error: {e}")
@@ -144,9 +152,9 @@ def start_watching(path):
     observer = Observer()
     observer.schedule(event_handler, abs_path, recursive=True)
     observer.start()
-    print("\n[AURA OS] 🟢 Real-Time Side-by-Side Agent Running.")
+    print("\n[AURA OS] 🟢 Real-Time Multi-Language Agent Running.")
     print(f"📂 Dynamically Watching Workspace: {abs_path}")
-    print(f"⚡ Live Heal Mode: ON (Instant {TYPING_WAIT_SECONDS}s response while typing)")
+    print(f"⚡ Human-in-the-Loop Mode: ON (Auto-apply: {AUTO_APPLY_FIX})")
 
     try:
         while True:
