@@ -1,7 +1,8 @@
 """AURA-OS backend."""
+from concurrent.futures import process
 import sys
 import os
-
+from pydantic import BaseModel
 # NUCLEAR PATH FIX: Adding every possible parent directory to Python's path
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.abspath(os.path.join(THIS_DIR, ".."))
@@ -30,8 +31,8 @@ from pydantic import BaseModel
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "60"))  # seconds
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "120"))  # seconds
 MAX_HISTORY = 50
 model = genai.GenerativeModel(MODEL_NAME)
 
@@ -256,3 +257,23 @@ async def run_heal(filepath: str, code: str, local_ok: bool = False, error_log: 
 async def heal_code(data: CodeData):
     # Now passing data.error_log to run_heal
     return await run_heal(data.filepath, data.code, data.local_ok, data.error_log)
+
+# --- HUMAN IN THE LOOP: APPROVAL API ---
+class PatchApproval(BaseModel):
+    file_path: str
+    patched_code: str
+
+@app.post("/api/approve-patch")
+async def approve_patch(data: PatchApproval):
+    try:
+        final_code = data.patched_code
+        # AI Loop Breaker: Add a tag so the watcher ignores this save
+        if "@aura-healed" not in final_code:
+            marker = "\n# @aura-healed" if data.file_path.endswith(".py") else "\n// @aura-healed"
+            final_code += marker
+
+        with open(data.file_path, "w", encoding="utf-8") as f:
+            f.write(final_code)
+        return {"status": "success", "message": f"{data.file_path} patched successfully!"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
